@@ -109,6 +109,23 @@ def fetch_ad_insights(ad_account_id, access_token, since, until):
     return _get_all_pages(f"{ad_account_id}/insights", params, access_token)
 
 
+def fetch_account_daily_spend(ad_account_id, access_token, since, until):
+    """
+    Fetch per-day spend/impressions/clicks at the account level with
+    time_increment=1, so each row has a "date_start" field.
+    Used to build the weekly trend chart.
+    """
+    fields = "spend,impressions,clicks,date_start"
+    params = {
+        "level": "account",
+        "fields": fields,
+        "time_increment": "1",
+        "time_range": json.dumps({"since": since, "until": until}),
+        "limit": 31,  # more than enough for a week
+    }
+    return _get_all_pages(f"{ad_account_id}/insights", params, access_token)
+
+
 def money(raw):
     """Convert a budget field from minor units to major currency units."""
     if raw is None:
@@ -155,8 +172,12 @@ def resolve_budget(adset, campaign):
 
 def build_report_dataset(ad_account_id, access_token, days_back):
     """
-    Returns a list of dicts, one per active ad, with spend/purchase metrics
-    for the requested period plus resolved budget info.
+    Returns a dict:
+      {"rows": [...], "daily_trend": [...]}
+    where "rows" is a list of dicts, one per active ad, with spend/purchase
+    metrics for the requested period plus resolved budget info.
+    "daily_trend" is a list of per-day account-level spend dicts (only
+    populated when days_back > 1, i.e. weekly reports).
     """
     today = datetime.now().strftime("%Y-%m-%d")
     until = today
@@ -225,5 +246,11 @@ def build_report_dataset(ad_account_id, access_token, days_back):
             "budget": budget,
         })
 
+    # Fetch daily trend data for weekly reports
+    daily_trend = []
+    if days_back > 1:
+        daily_trend = fetch_account_daily_spend(ad_account_id, access_token, since, until)
+        logger.info("build_report_dataset  daily_trend rows fetched: %s", len(daily_trend))
+
     logger.info("build_report_dataset  final row count: %s", len(rows))
-    return rows
+    return {"rows": rows, "daily_trend": daily_trend}

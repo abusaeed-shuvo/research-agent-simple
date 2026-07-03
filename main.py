@@ -28,7 +28,7 @@ logger = get_logger()
 LMSTUDIO_BASE_URL = "http://localhost:1234/v1"
 LMSTUDIO_API_KEY = "lm-studio"  # dummy, LM Studio doesn't check it
 
-SAVE_DIR = Path.cwd() / "AI-search"
+SAVE_DIR = Path(__file__).resolve().parent / "AI-search"
 
 # .env lives right next to this script.
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -122,10 +122,192 @@ def timestamp_for_filename():
 def ads_report_filename(period: str) -> Path:
     stamp = timestamp_for_filename()
     if period == "weekly":
-        name = f"Meta-ads-report-weekly-{stamp}.md"
+        name = f"Meta-ads-report-weekly-{stamp}.html"
     else:
-        name = f"Meta-ads-report-{stamp}.md"
+        name = f"Meta-ads-report-{stamp}.html"
     return SAVE_DIR / name
+
+
+def build_table_html(rows):
+    """Build an HTML <table> string from the rows list."""
+    if not rows:
+        return "<p>No data available.</p>"
+
+    lines = ['<table>']
+    lines.append('<thead><tr>'
+                 '<th>Ad Name</th>'
+                 '<th>Period Spend</th>'
+                 '<th>Budget Type</th>'
+                 '<th>Budget / Remaining</th>'
+                 '<th>Cost per Purchase</th>'
+                 '</tr></thead>')
+    lines.append('<tbody>')
+    for r in rows:
+        ad_name = r.get("ad_name", "—")
+        period_spend = r.get("period_spend", 0)
+        budget = r.get("budget", {})
+        budget_type = budget.get("type", "unknown")
+        budget_amount = budget.get("amount")
+        if budget_type == "daily":
+            remaining = budget.get("remaining_today")
+            budget_display = f"Daily {budget_amount}" if budget_amount else "Daily —"
+            if remaining is not None:
+                budget_display += f" / {remaining} left"
+        elif budget_type == "lifetime":
+            remaining = budget.get("remaining")
+            budget_display = f"Lifetime {budget_amount}" if budget_amount else "Lifetime —"
+            if remaining is not None:
+                budget_display += f" / {remaining} left"
+        else:
+            budget_display = "—"
+        cpp = r.get("cost_per_purchase")
+        cpp_display = f"{cpp:.2f}" if cpp is not None else "—"
+
+        lines.append(f'<tr>'
+                     f'<td>{ad_name}</td>'
+                     f'<td class="num">{period_spend:.2f}</td>'
+                     f'<td>{budget_type}</td>'
+                     f'<td>{budget_display}</td>'
+                     f'<td class="num">{cpp_display}</td>'
+                     f'</tr>')
+    lines.append('</tbody></table>')
+    return "\n".join(lines)
+
+
+def build_charts_script(rows, daily_trend):
+    """Build the <script> block that instantiates Chart.js charts."""
+    # --- Bar chart: spendChart ---
+    labels = [r.get("ad_name", f"Ad {i}") for i, r in enumerate(rows)]
+    spend_data = [r.get("period_spend", 0) for r in rows]
+    cpp_data = [r.get("cost_per_purchase") for r in rows]
+
+    bar_config = {
+        "type": "bar",
+        "data": {
+            "labels": labels,
+            "datasets": [
+                {
+                    "label": "Period Spend",
+                    "data": spend_data,
+                    "backgroundColor": "rgba(54, 162, 235, 0.7)",
+                    "borderColor": "rgba(54, 162, 235, 1)",
+                    "borderWidth": 1,
+                    "yAxisID": "y",
+                },
+            ],
+        },
+        "options": {
+            "responsive": True,
+            "plugins": {
+                "legend": {"labels": {"color": "#c0c0e0"}},
+                "datalabels": {
+                    "display": False,  # disabled by default; we use annotation via tooltip
+                },
+            },
+            "scales": {
+                "y": {
+                    "beginAtZero": True,
+                    "title": {"display": True, "text": "Spend", "color": "#c0c0e0"},
+                    "grid": {"color": "rgba(255,255,255,0.05)"},
+                    "ticks": {"color": "#8888aa"},
+                },
+                "x": {
+                    "grid": {"color": "rgba(255,255,255,0.05)"},
+                    "ticks": {"color": "#8888aa"},
+                },
+            },
+        },
+    }
+
+    # Add cost_per_purchase as data labels on top of bars
+    # We'll use a second hidden dataset with datalabels plugin for the labels
+    # But to keep it simple, we'll add a custom plugin inline in the script
+    # Actually, the simplest approach: add a second dataset (scatter points) with labels
+    # Even simpler: just show tooltip on hover. Let's add datalabels via a simple approach:
+    # We'll add a custom afterDraw plugin that draws the CPP text on each bar.
+    # But that requires the Chart.js plugin API. Let's use the built-in tooltip instead.
+    # For simplicity, we'll add cost_per_purchase as a data label using the datalabels plugin
+    # which is bundled with Chart.js v4 via the chartjs-plugin-datalabels.
+    # Actually, chartjs-plugin-datalabels is NOT bundled. Let me use a simpler approach:
+    # Show CPP as a second y-axis dataset (line) with data labels.
+
+    # Simpler: just show CPP as a second dataset on a secondary y-axis
+    cpp_display_data = [v if v is not None else None for v in cpp_data]
+    bar_config["data"]["datasets"].append({
+        "label": "Cost per Purchase",
+        "data": cpp_display_data,
+        "type": "line",
+        "borderColor": "rgba(255, 159, 64, 1)",
+        "backgroundColor": "rgba(255, 159, 64, 0.2)",
+        "pointBackgroundColor": "rgba(255, 159, 64, 1)",
+        "pointRadius": 5,
+        "pointHoverRadius": 7,
+        "fill": False,
+        "tension": 0.1,
+        "yAxisID": "y1",
+    })
+    bar_config["options"]["scales"]["y1"] = {
+        "position": "right",
+        "beginAtZero": True,
+        "title": {"display": True, "text": "Cost per Purchase", "color": "#c0c0e0"},
+        "grid": {"drawOnChartArea": False},
+        "ticks": {"color": "#8888aa"},
+    }
+
+    # --- Line chart: trendChart (weekly only) ---
+    trend_config = None
+    if daily_trend:
+        trend_labels = [d.get("date_start", "") for d in daily_trend]
+        trend_spend = [float(d.get("spend", 0) or 0) for d in daily_trend]
+        trend_config = {
+            "type": "line",
+            "data": {
+                "labels": trend_labels,
+                "datasets": [
+                    {
+                        "label": "Daily Spend",
+                        "data": trend_spend,
+                        "borderColor": "rgba(75, 192, 192, 1)",
+                        "backgroundColor": "rgba(75, 192, 192, 0.2)",
+                        "fill": True,
+                        "tension": 0.3,
+                        "pointRadius": 4,
+                        "pointHoverRadius": 6,
+                    },
+                ],
+            },
+            "options": {
+                "responsive": True,
+                "plugins": {
+                    "legend": {"labels": {"color": "#c0c0e0"}},
+                },
+                "scales": {
+                    "y": {
+                        "beginAtZero": True,
+                        "title": {"display": True, "text": "Spend", "color": "#c0c0e0"},
+                        "grid": {"color": "rgba(255,255,255,0.05)"},
+                        "ticks": {"color": "#8888aa"},
+                    },
+                    "x": {
+                        "grid": {"color": "rgba(255,255,255,0.05)"},
+                        "ticks": {"color": "#8888aa"},
+                    },
+                },
+            },
+        }
+
+    parts = []
+    parts.append("const spendCtx = document.getElementById('spendChart').getContext('2d');")
+    parts.append(f"new Chart(spendCtx, {json.dumps(bar_config, default=str)});")
+
+    if trend_config:
+        parts.append(
+            "document.getElementById('trendSection').style.display = 'block';"
+        )
+        parts.append("const trendCtx = document.getElementById('trendChart').getContext('2d');")
+        parts.append(f"new Chart(trendCtx, {json.dumps(trend_config, default=str)});")
+
+    return "<script>\n" + "\n".join(parts) + "\n</script>"
 
 
 class ModelSelectScreen(Screen):
@@ -288,7 +470,9 @@ Data:
 
             logger.info("handle_ads_report  period=%s  days_back=%s", period, days_back)
             self.set_status("📊 Fetching Meta Ads data...")
-            rows = meta_ads.build_report_dataset(FB_AD_ACCOUNT_ID, FB_ACCESS_TOKEN, days_back)
+            dataset = meta_ads.build_report_dataset(FB_AD_ACCOUNT_ID, FB_ACCESS_TOKEN, days_back)
+            rows = dataset["rows"]
+            daily_trend = dataset["daily_trend"]
             logger.info("handle_ads_report  build_report_dataset returned %s rows", len(rows))
 
             if not rows:
@@ -300,12 +484,11 @@ Data:
 
             self.set_status("🧠 Summarizing performance...")
             ads_prompt = f"""You are a performance marketing analyst reviewing Meta (Facebook) Ads
-data for {label}. Using the JSON data below, write a markdown report with:
+data for {label}. Using the JSON data below, write a short narrative analysis with:
 
-1. An overview table: Ad name | Period spend | Budget type | Budget / Remaining | Cost per purchase
-2. A short section flagging any ad whose cost-per-purchase is notably worse than the account average
+1. A 3-5 sentence written summary of overall account health for this period
+2. A section flagging any ad whose cost-per-purchase is notably worse than the account average
    (or has spend but zero purchases)
-3. A 3-5 sentence written summary of overall account health for this period
 
 Notes on the data: "budget.type" is either "daily" (resets each day -- "remaining_today" is what's
 left of today's budget) or "lifetime" (a running total across the campaign -- "remaining" is what
@@ -314,14 +497,52 @@ Meta reports as left). Amounts are in the ad account's currency's major unit.
 Data:
 {json.dumps(rows, ensure_ascii=False, default=str)}
 """
-            digest = generate_text(model, ads_prompt)
+            narrative = generate_text(model, ads_prompt)
+
+            # Build the HTML report
+            self.set_status("📄 Assembling HTML report...")
+            table_html = build_table_html(rows)
+
+            # Wrap narrative in <p> tags
+            narrative_paragraphs = "".join(
+                f"<p>{para.strip()}</p>\n"
+                for para in narrative.split("\n\n")
+                if para.strip()
+            )
+
+            # Load template
+            template_path = Path(__file__).resolve().parent / "assets" / "report_template.html"
+            template = template_path.read_text(encoding="utf-8")
+
+            # Load Chart.js source
+            chartjs_path = Path(__file__).resolve().parent / "assets" / "chartjs" / "chart.umd.min.js"
+            chartjs_source = chartjs_path.read_text(encoding="utf-8")
+            chartjs_script = f"<script>\n{chartjs_source}\n</script>"
+
+            # Build charts script
+            charts_script = build_charts_script(rows, daily_trend)
+
+            # Assemble
+            title = f"Meta Ads Report — {'Weekly' if period == 'weekly' else 'Daily'}"
+            generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            html = template.replace("{{TITLE}}", title)
+            html = html.replace("{{GENERATED_AT}}", generated_at)
+            html = html.replace("{{CHARTJS_SCRIPT}}", chartjs_script)
+            html = html.replace("{{TABLE_HTML}}", table_html)
+            html = html.replace("{{NARRATIVE_HTML}}", narrative_paragraphs)
+            html = html.replace("{{CHARTS_SCRIPT}}", charts_script)
 
             SAVE_DIR.mkdir(parents=True, exist_ok=True)
             filepath = ads_report_filename(period)
-            filepath.write_text(digest, encoding="utf-8")
+            filepath.write_text(html, encoding="utf-8")
 
-            self.app.call_from_thread(log.write, Markdown(digest))
-            self.app.call_from_thread(log.write, f"\n[dim]Saved to {filepath}[/dim]\n")
+            # Show narrative in TUI (can't render HTML inline)
+            self.app.call_from_thread(log.write, Markdown(narrative))
+            self.app.call_from_thread(
+                log.write,
+                f"\n[dim]Full report with charts saved to {filepath}[/dim]\n",
+            )
             self.set_status("Ready.")
         except Exception as e:
             self.app.call_from_thread(log.write, f"\n[bold red]Error:[/bold red] {e}\n")
