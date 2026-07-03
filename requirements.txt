@@ -1,0 +1,7 @@
+textual
+openai
+requests
+beautifulsoup4
+ddgs
+python-dotenv
+google-genai

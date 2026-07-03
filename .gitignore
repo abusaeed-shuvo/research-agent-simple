@@ -1,0 +1,5 @@
+.env
+AI-search/
+logs/
+.venv/
+__pycache__/
